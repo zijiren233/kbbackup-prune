@@ -1,0 +1,10 @@
+apiVersion: v2
+name: kbbackup-prune
+description: Safely plan and prune orphaned KubeBlocks backups from S3
+type: application
+version: 0.1.0
+appVersion: "dev"
+kubeVersion: ">=1.24.0-0"
+home: https://github.com/labring-sigs/kbbackup-prune
+sources:
+  - https://github.com/labring-sigs/kbbackup-prune

@@ -1,0 +1,66 @@
+{{- if and .Values.config.useBackupRepoCredentials .Values.rbac.create .Values.serviceAccount.create (not .Values.secretReader.create) }}
+{{- fail "secretReader.create=true with secretReader.namespace and secretReader.secretName is required when repository credentials use chart-managed RBAC and ServiceAccount" }}
+{{- end }}
+{{- if eq .Values.workload.kind "Job" }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "kbbackup-prune.jobName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kbbackup-prune.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cleanup
+spec:
+  backoffLimit: {{ .Values.job.backoffLimit }}
+  ttlSecondsAfterFinished: {{ .Values.job.ttlSecondsAfterFinished }}
+  activeDeadlineSeconds: {{ .Values.job.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "kbbackup-prune.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cleanup
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "kbbackup-prune.podSpec" . | nindent 6 }}
+{{- else if eq .Values.workload.kind "CronJob" }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "kbbackup-prune.cronJobName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kbbackup-prune.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cleanup
+spec:
+  schedule: {{ .Values.workload.schedule | quote }}
+  concurrencyPolicy: {{ .Values.workload.concurrencyPolicy }}
+  suspend: {{ .Values.workload.suspend }}
+  successfulJobsHistoryLimit: {{ .Values.workload.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.workload.failedJobsHistoryLimit }}
+  startingDeadlineSeconds: {{ .Values.workload.startingDeadlineSeconds }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.job.backoffLimit }}
+      ttlSecondsAfterFinished: {{ .Values.job.ttlSecondsAfterFinished }}
+      activeDeadlineSeconds: {{ .Values.job.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "kbbackup-prune.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: cleanup
+            {{- with .Values.podLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.podAnnotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        spec:
+          {{- include "kbbackup-prune.podSpec" . | nindent 10 }}
+{{- end }}

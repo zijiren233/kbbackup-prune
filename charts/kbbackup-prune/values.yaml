@@ -1,0 +1,104 @@
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/labring-sigs/kbbackup-prune
+  tag: latest
+  pullPolicy: Always
+
+# Job runs once when the release is installed. CronJob requires an explicit opt-in.
+workload:
+  kind: Job
+  schedule: "17 2 * * *"
+  concurrencyPolicy: Forbid
+  suspend: false
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300
+
+job:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  activeDeadlineSeconds: 3600
+
+config:
+  backupRepo: ""
+  debug: false
+  command: plan
+  output: json
+  kubeMode: in-cluster
+  kubeconfig: ""
+  context: ""
+  namespace: ""
+  bucket: ""
+  endpoint: ""
+  region: ""
+  prefix: ""
+  pathStyle: false
+  bucketVersioning: auto
+  caFile: ""
+  insecureSkipTLSVerify: false
+  manifestName: kubeblocks-backup.json
+  minAge: 168h
+  requestTimeout: 30s
+  timeout: 30m
+  useBackupRepoCredentials: true
+  includeRetained: false
+  deleteRepositoryStray: false
+  purgeVersions: false
+  showAll: false
+  failOnOrphans: false
+  dryRun: true
+  confirm: ""
+  concurrency: 4
+  extraArgs: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  create: true
+
+# Required when BackupRepo credentials use the chart-managed RBAC and ServiceAccount.
+# Prefer status.generatedCSIDriverSecret; use spec.credential when the generated
+# reference is absent. Existing externally authorized ServiceAccounts can leave
+# this disabled together with serviceAccount.create=false or rbac.create=false.
+secretReader:
+  create: false
+  namespace: ""
+  secretName: ""
+
+podAnnotations: {}
+podLabels: {}
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+imagePullSecrets: []
+extraEnv: []
+envFrom: []
+extraVolumes: []
+extraVolumeMounts: []
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+terminationGracePeriodSeconds: 30

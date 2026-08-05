@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string", "minLength": 1},
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      },
+      "required": ["repository", "tag", "pullPolicy"]
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["Job", "CronJob"]
+        },
+        "schedule": {
+          "type": "string",
+          "minLength": 1
+        },
+        "concurrencyPolicy": {
+          "type": "string",
+          "enum": ["Allow", "Forbid", "Replace"]
+        },
+        "suspend": {"type": "boolean"},
+        "successfulJobsHistoryLimit": {"type": "integer", "minimum": 0},
+        "failedJobsHistoryLimit": {"type": "integer", "minimum": 0},
+        "startingDeadlineSeconds": {"type": "integer", "minimum": 0}
+      },
+      "required": [
+        "kind",
+        "schedule",
+        "concurrencyPolicy",
+        "suspend",
+        "successfulJobsHistoryLimit",
+        "failedJobsHistoryLimit",
+        "startingDeadlineSeconds"
+      ]
+    },
+    "job": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backoffLimit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ttlSecondsAfterFinished": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "activeDeadlineSeconds": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": ["backoffLimit", "ttlSecondsAfterFinished", "activeDeadlineSeconds"]
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backupRepo": {
+          "type": "string"
+        },
+        "debug": {"type": "boolean"},
+        "command": {
+          "type": "string",
+          "enum": ["plan", "prune"]
+        },
+        "output": {
+          "type": "string",
+          "enum": ["table", "json"]
+        },
+        "kubeMode": {
+          "type": "string",
+          "enum": ["auto", "kubeconfig", "in-cluster"]
+        },
+        "kubeconfig": {"type": "string"},
+        "context": {"type": "string"},
+        "namespace": {"type": "string"},
+        "bucket": {"type": "string"},
+        "endpoint": {"type": "string"},
+        "region": {"type": "string"},
+        "prefix": {"type": "string"},
+        "pathStyle": {"type": "boolean"},
+        "bucketVersioning": {
+          "type": "string",
+          "enum": ["auto", "disabled", "enabled", "suspended"]
+        },
+        "caFile": {"type": "string"},
+        "insecureSkipTLSVerify": {"type": "boolean"},
+        "manifestName": {"type": "string", "minLength": 1},
+        "minAge": {"type": "string", "minLength": 1},
+        "requestTimeout": {"type": "string", "minLength": 1},
+        "timeout": {"type": "string", "minLength": 1},
+        "useBackupRepoCredentials": {"type": "boolean"},
+        "includeRetained": {"type": "boolean"},
+        "deleteRepositoryStray": {"type": "boolean"},
+        "purgeVersions": {"type": "boolean"},
+        "showAll": {"type": "boolean"},
+        "failOnOrphans": {"type": "boolean"},
+        "dryRun": {"type": "boolean"},
+        "confirm": {"type": "string"},
+        "concurrency": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "extraArgs": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      },
+      "required": ["backupRepo", "command", "output", "kubeMode"]
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": {"type": "boolean"},
+        "name": {"type": "string"},
+        "annotations": {"type": "object"}
+      },
+      "required": ["create", "name", "annotations"]
+    },
+    "rbac": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": {"type": "boolean"}
+      },
+      "required": ["create"]
+    },
+    "secretReader": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": {"type": "boolean"},
+        "namespace": {"type": "string"},
+        "secretName": {"type": "string"}
+      },
+      "required": ["create", "namespace", "secretName"]
+    }
+  },
+  "required": ["image", "workload", "job", "config", "serviceAccount", "rbac", "secretReader"]
+}

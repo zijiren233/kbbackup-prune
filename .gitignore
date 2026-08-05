@@ -1,0 +1,5 @@
+/bin/
+/coverage.out
+/kbbackup-prune
+/kbbackup-prune.*
+/*.txt

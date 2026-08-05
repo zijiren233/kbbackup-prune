@@ -1,0 +1,9 @@
+The {{ .Values.workload.kind }} workload is configured for BackupRepo {{ .Values.config.backupRepo }}.
+
+{{- if eq .Values.workload.kind "Job" }}
+Follow the one-time Job:
+  kubectl logs -n {{ .Release.Namespace }} -f job/{{ include "kbbackup-prune.jobName" . }}
+{{- else }}
+Inspect the scheduled workload:
+  kubectl get cronjob -n {{ .Release.Namespace }} {{ include "kbbackup-prune.cronJobName" . }}
+{{- end }}

@@ -1,0 +1,40 @@
+{{- if .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kbbackup-prune.clusterRoleName" . }}
+  labels:
+    {{- include "kbbackup-prune.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["dataprotection.kubeblocks.io"]
+    resources: ["backups"]
+    verbs: ["get", "list"]
+  - apiGroups: ["dataprotection.kubeblocks.io"]
+    resources: ["backuprepos"]
+    resourceNames: [{{ required "config.backupRepo is required" .Values.config.backupRepo | quote }}]
+    verbs: ["get"]
+  - apiGroups: ["dataprotection.kubeblocks.io"]
+    resources: ["restores"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims", "persistentvolumes"]
+    verbs: ["list"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kbbackup-prune.clusterRoleName" . }}
+  labels:
+    {{- include "kbbackup-prune.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kbbackup-prune.clusterRoleName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kbbackup-prune.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
