@@ -31,6 +31,6 @@ type ObjectStore interface {
 	) error
 	Open(ctx context.Context, key string, maxBytes int64) (io.ReadCloser, error)
 	Stat(ctx context.Context, key string) (domain.Object, error)
-	Delete(ctx context.Context, objects []domain.Object) error
+	Delete(ctx context.Context, objects []domain.Object) (domain.DeleteReport, error)
 	Versioning(ctx context.Context) (string, error)
 }

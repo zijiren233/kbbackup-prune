@@ -122,7 +122,11 @@ type Object struct {
 	LastModified time.Time `json:"lastModified"`
 	ETag         string    `json:"etag,omitempty"`
 	VersionID    string    `json:"versionId,omitempty"`
-	DeleteMarker bool      `json:"deleteMarker,omitempty"`
+	// Generation is the Google Cloud Storage object generation. GCS exposes
+	// this identity on ordinary object listings, while the S3 model calls the
+	// same value VersionId only in its interoperability version listing.
+	Generation   string `json:"generation,omitempty"`
+	DeleteMarker bool   `json:"deleteMarker,omitempty"`
 }
 
 type ObjectLevel struct {
@@ -248,6 +252,17 @@ type DeleteResult struct {
 	ObjectsDeleted int    `json:"objectsDeleted"`
 	BytesDeleted   int64  `json:"bytesDeleted"`
 	Error          string `json:"error,omitempty"`
+}
+
+type DeleteFailure struct {
+	Object  Object `json:"object"`
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+type DeleteReport struct {
+	Deleted []Object        `json:"deleted,omitempty"`
+	Failed  []DeleteFailure `json:"failed,omitempty"`
 }
 
 type Execution struct {

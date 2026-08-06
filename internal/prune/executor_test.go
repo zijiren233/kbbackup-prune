@@ -3,6 +3,7 @@ package prune //nolint:testpackage // White-box tests exercise executor race gua
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path"
 	"sync"
 	"testing"
@@ -24,6 +25,44 @@ type fakeKube struct {
 	settings       domain.S3Settings
 	inventoryErr   error
 	namespace      string
+}
+
+type partialDeleteStore struct {
+	*memoryStore
+}
+
+func (s *partialDeleteStore) Delete(
+	_ context.Context,
+	objects []domain.Object,
+) (domain.DeleteReport, error) {
+	report := domain.DeleteReport{Deleted: []domain.Object{objects[0]}}
+	for _, object := range objects[1:] {
+		report.Failed = append(report.Failed, domain.DeleteFailure{
+			Object: object, Code: "AccessDenied", Message: "denied",
+		})
+	}
+
+	return report, errors.New("partial object deletion")
+}
+
+type cancelOnListStore struct {
+	*memoryStore
+	cancel context.CancelFunc
+	mu     sync.Mutex
+	calls  int
+}
+
+func (s *cancelOnListStore) List(
+	ctx context.Context,
+	_ string,
+	_ bool,
+) ([]domain.Object, error) {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	s.cancel()
+
+	return nil, ctx.Err()
 }
 
 func (k *fakeKube) Inventory(
@@ -165,6 +204,40 @@ func TestExecutorKeepsManifestWhenDataDeletionFails(t *testing.T) {
 	require.ErrorContains(t, errors.New(execution.Results[0].Error), "data delete failed")
 	require.Len(t, store.deleteCalls, 1)
 	require.NotEqual(t, plan.Candidates[0].ManifestKey, store.deleteCalls[0][0].Key)
+	require.Zero(t, execution.Results[0].ObjectsDeleted)
+	require.Zero(t, execution.Results[0].BytesDeleted)
+}
+
+func TestExecutorReportsPartialDeletionTotals(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	root := "pvc-33333333-3333-4333-8333-333333333333"
+	objects := []domain.Object{
+		{Key: root + "/one", Size: 10, ETag: "one", LastModified: now},
+		{Key: root + "/two", Size: 20, ETag: "two", LastModified: now},
+	}
+	plan := domain.Plan{
+		Repository: "repo", Bucket: "bucket", Versioning: domain.BucketVersioningDisabled,
+		VolumeDiscovery: true, DeleteObjects: 2, DeleteBytes: 30,
+		Candidates: []domain.Candidate{{
+			Kind: domain.CandidateOrphanVolumeRoot, Prefix: root, State: domain.StateOrphan,
+			Objects: objects, ObjectCount: 2, Bytes: 30,
+		}},
+	}
+	store := &partialDeleteStore{memoryStore: &memoryStore{current: objects}}
+	kubeClient := &fakeKube{inventory: domain.Inventory{
+		Backups: make(map[domain.BackupKey]domain.Backup), Repo: domain.Repository{Name: "repo"},
+	}}
+
+	execution, err := (Executor{Kube: kubeClient, Store: store}).Run(
+		context.Background(), plan, ExecuteOptions{Concurrency: 1},
+	)
+	require.ErrorContains(t, err, "failed deletion")
+	require.Len(t, execution.Results, 1)
+	require.Equal(t, 1, execution.Results[0].ObjectsDeleted)
+	require.EqualValues(t, 10, execution.Results[0].BytesDeleted)
+	require.ErrorContains(t, errors.New(execution.Results[0].Error), "partial object deletion")
 }
 
 func TestExecutorDeletesManifestlessBackupFromExactSnapshot(t *testing.T) {
@@ -480,18 +553,96 @@ func TestCandidateSafetyValidatorSharesSufficientlyFreshInventory(t *testing.T) 
 		plan:     domain.Plan{Repository: "repo"},
 	}
 
-	after := time.Now()
 	for _, root := range []string{
 		"pvc-11111111-1111-4111-8111-111111111111",
 		"pvc-22222222-2222-4222-8222-222222222222",
 	} {
 		err := validator.validate(context.Background(), domain.Candidate{
 			Kind: domain.CandidateOrphanVolumeRoot, Prefix: root,
-		}, after)
+		})
 		require.NoError(t, err)
 	}
 
 	require.Equal(t, 1, kubeClient.inventoryCalls)
+}
+
+func TestExecutorSharesInventoryAcrossLargeCandidateSet(t *testing.T) {
+	t.Parallel()
+
+	const candidateCount = 256
+
+	now := time.Now().UTC()
+	plan := domain.Plan{
+		Repository: "repo", Bucket: "bucket", Versioning: domain.BucketVersioningDisabled,
+		VolumeDiscovery: true,
+	}
+
+	store := &memoryStore{}
+	for index := range candidateCount {
+		root := fmt.Sprintf("pvc-%08x-0000-4000-8000-000000000000", index)
+		object := domain.Object{
+			Key: root + "/data", Size: 1, ETag: fmt.Sprintf("etag-%d", index), LastModified: now,
+		}
+		plan.Candidates = append(plan.Candidates, domain.Candidate{
+			Kind: domain.CandidateOrphanVolumeRoot, Prefix: root, State: domain.StateOrphan,
+			Objects: []domain.Object{object}, ObjectCount: 1, Bytes: 1,
+		})
+		plan.DeleteObjects++
+		plan.DeleteBytes++
+
+		store.current = append(store.current, object)
+	}
+
+	kubeClient := &fakeKube{inventory: domain.Inventory{
+		Backups: make(map[domain.BackupKey]domain.Backup), Repo: domain.Repository{Name: "repo"},
+	}}
+
+	execution, err := (Executor{Kube: kubeClient, Store: store}).Run(
+		context.Background(), plan, ExecuteOptions{Concurrency: 1},
+	)
+	require.NoError(t, err)
+	require.Len(t, execution.Results, candidateCount)
+	require.Equal(t, 2, kubeClient.inventoryCalls)
+	require.Zero(t, kubeClient.existsCalls)
+}
+
+func TestExecutorStopsSchedulingAfterContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	const candidateCount = 100
+
+	now := time.Now().UTC()
+
+	plan := domain.Plan{
+		Repository: "repo", Bucket: "bucket", Versioning: domain.BucketVersioningDisabled,
+		VolumeDiscovery: true,
+	}
+	for index := range candidateCount {
+		root := fmt.Sprintf("pvc-%08x-0000-4000-8000-000000000001", index)
+		object := domain.Object{Key: root + "/data", Size: 1, ETag: "etag", LastModified: now}
+		plan.Candidates = append(plan.Candidates, domain.Candidate{
+			Kind: domain.CandidateOrphanVolumeRoot, Prefix: root, State: domain.StateOrphan,
+			Objects: []domain.Object{object}, ObjectCount: 1, Bytes: 1,
+		})
+		plan.DeleteObjects++
+		plan.DeleteBytes++
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	store := &cancelOnListStore{memoryStore: &memoryStore{}, cancel: cancel}
+	kubeClient := &fakeKube{inventory: domain.Inventory{
+		Backups: make(map[domain.BackupKey]domain.Backup), Repo: domain.Repository{Name: "repo"},
+	}}
+	execution, err := (Executor{Kube: kubeClient, Store: store}).Run(
+		ctx, plan, ExecuteOptions{Concurrency: 1},
+	)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Less(t, len(execution.Results), candidateCount)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	require.Equal(t, 1, store.calls)
+	require.Empty(t, store.deleted)
 }
 
 func TestExecutorRefreshesKubernetesProtections(t *testing.T) {

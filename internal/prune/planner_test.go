@@ -154,15 +154,18 @@ func (s *memoryStore) Stat(_ context.Context, key string) (domain.Object, error)
 	return domain.Object{}, errors.New("not found")
 }
 
-func (s *memoryStore) Delete(_ context.Context, objects []domain.Object) error {
+func (s *memoryStore) Delete(
+	_ context.Context,
+	objects []domain.Object,
+) (domain.DeleteReport, error) {
 	s.deleteCalls = append(s.deleteCalls, append([]domain.Object(nil), objects...))
 	if s.deleteErr != nil && (s.deleteErrAt == 0 || len(s.deleteCalls) == s.deleteErrAt) {
-		return s.deleteErr
+		return domain.DeleteReport{}, s.deleteErr
 	}
 
 	s.deleted = append(s.deleted, objects...)
 
-	return nil
+	return domain.DeleteReport{Deleted: append([]domain.Object(nil), objects...)}, nil
 }
 
 func (s *memoryStore) Versioning(_ context.Context) (string, error) {

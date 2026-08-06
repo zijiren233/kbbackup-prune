@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"path"
 	"sync"
-	"time"
 
 	"github.com/labring-sigs/kbbackup-prune/internal/domain"
 	"github.com/labring-sigs/kbbackup-prune/internal/ports"
@@ -61,7 +60,8 @@ func (e Executor) Run(
 		return result, nil
 	}
 
-	if err := e.revalidateInventory(ctx, plan); err != nil {
+	initialInventory, err := e.revalidateInventorySnapshot(ctx, plan)
+	if err != nil {
 		return result, err
 	}
 
@@ -93,7 +93,9 @@ func (e Executor) Run(
 
 	var failed int
 
-	validator := candidateSafetyValidator{executor: e, plan: plan}
+	validator := candidateSafetyValidator{
+		executor: e, plan: plan, inventory: initialInventory,
+	}
 	for _, group := range [][]domain.Candidate{strayCandidates, otherCandidates} {
 		for _, deleteResult := range e.runCandidateGroup(ctx, group, opts, &validator) {
 			if deleteResult.Error != "" {
@@ -131,13 +133,17 @@ func (e Executor) runCandidateGroup(
 	var workers sync.WaitGroup
 	for range opts.Concurrency {
 		workers.Go(func() {
-			for candidate := range jobs {
-				results <- e.deleteCandidate(
-					ctx,
-					candidate,
-					opts.PurgeVersions,
-					validator,
-				)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case candidate, ok := <-jobs:
+					if !ok {
+						return
+					}
+
+					results <- e.deleteCandidate(ctx, candidate, opts.PurgeVersions, validator)
+				}
 			}
 		})
 	}
@@ -265,9 +271,17 @@ func validateExecutionPlan(plan domain.Plan, opts ExecuteOptions) error {
 }
 
 func (e Executor) revalidateInventory(ctx context.Context, plan domain.Plan) error {
+	_, err := e.revalidateInventorySnapshot(ctx, plan)
+	return err
+}
+
+func (e Executor) revalidateInventorySnapshot(
+	ctx context.Context,
+	plan domain.Plan,
+) (domain.Inventory, error) {
 	inventory, err := e.refreshInventory(ctx, plan)
 	if err != nil {
-		return err
+		return domain.Inventory{}, err
 	}
 
 	dependencies := liveDependencyKeys(inventory.Backups)
@@ -277,11 +291,11 @@ func (e Executor) revalidateInventory(ctx context.Context, plan domain.Plan) err
 		}
 
 		if err := validateCandidateInventory(candidate, inventory, dependencies); err != nil {
-			return err
+			return domain.Inventory{}, err
 		}
 	}
 
-	return nil
+	return inventory, nil
 }
 
 func (e Executor) refreshInventory(
@@ -372,36 +386,24 @@ type candidateSafetyValidator struct {
 	plan     domain.Plan
 
 	mutex          sync.Mutex
-	refreshStarted time.Time
 	inventory      domain.Inventory
 	inventoryValid bool
+}
+
+func (v *candidateSafetyValidator) needsLegacyBackupCheck() bool {
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
+	return v.inventory.Backups == nil
 }
 
 func (v *candidateSafetyValidator) validate(
 	ctx context.Context,
 	candidate domain.Candidate,
-	after time.Time,
 ) error {
-	if normalizedCandidateKind(candidate.Kind) == domain.CandidateBackup {
-		exists, err := v.executor.Kube.BackupExists(ctx, candidate.Backup)
-		if err != nil {
-			return fmt.Errorf("get Backup CR: %w", err)
-		}
-
-		if exists {
-			return errors.New("backup CR appeared after the final object snapshot")
-		}
-
-		return nil
-	}
-
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
 
-	if !v.inventoryValid || v.refreshStarted.Before(after) {
-		v.refreshStarted = time.Now()
-		v.inventoryValid = false
-
+	if !v.inventoryValid {
 		inventory, err := v.executor.refreshInventory(ctx, v.plan)
 		if err != nil {
 			v.inventory = domain.Inventory{}
@@ -410,6 +412,21 @@ func (v *candidateSafetyValidator) validate(
 
 		v.inventory = inventory
 		v.inventoryValid = true
+	}
+
+	// Inventory is authoritative for real Kubernetes clients. The fallback
+	// keeps the validator useful for lightweight port implementations that do
+	// not expose a Backup map.
+	if normalizedCandidateKind(candidate.Kind) == domain.CandidateBackup &&
+		v.inventory.Backups == nil {
+		exists, err := v.executor.Kube.BackupExists(ctx, candidate.Backup)
+		if err != nil {
+			return fmt.Errorf("get Backup CR: %w", err)
+		}
+
+		if exists {
+			return errors.New("backup CR appeared after the final object snapshot")
+		}
 	}
 
 	return validateCandidateInventory(
@@ -576,16 +593,17 @@ func (e Executor) deleteBackupCandidate(
 	validator *candidateSafetyValidator,
 ) domain.DeleteResult {
 	result := domain.DeleteResult{Prefix: candidate.Prefix}
+	if validator.needsLegacyBackupCheck() {
+		exists, err := e.Kube.BackupExists(ctx, candidate.Backup)
+		if err != nil {
+			result.Error = fmt.Sprintf("recheck Backup CR: %v", err)
+			return result
+		}
 
-	exists, err := e.Kube.BackupExists(ctx, candidate.Backup)
-	if err != nil {
-		result.Error = fmt.Sprintf("recheck Backup CR: %v", err)
-		return result
-	}
-
-	if exists {
-		result.Error = "Backup CR appeared after planning"
-		return result
+		if exists {
+			result.Error = "Backup CR appeared after planning"
+			return result
+		}
 	}
 
 	if candidate.ManifestKey == "" {
@@ -642,13 +660,16 @@ func (e Executor) deleteBackupCandidate(
 		return result
 	}
 
-	if err := validator.validate(ctx, candidate, time.Now()); err != nil {
+	if err := validator.validate(ctx, candidate); err != nil {
 		result.Error = fmt.Sprintf("final Kubernetes recheck: %v", err)
 		return result
 	}
 
 	if len(dataObjects) > 0 {
-		if err := e.Store.Delete(ctx, dataObjects); err != nil {
+		report, err := e.Store.Delete(ctx, dataObjects)
+		addDeleteReport(&result, report)
+
+		if err != nil {
 			result.Error = err.Error()
 
 			return result
@@ -656,21 +677,24 @@ func (e Executor) deleteBackupCandidate(
 	}
 
 	if len(historicalManifests) > 0 {
-		if err := e.Store.Delete(ctx, historicalManifests); err != nil {
+		report, err := e.Store.Delete(ctx, historicalManifests)
+		addDeleteReport(&result, report)
+
+		if err != nil {
 			result.Error = err.Error()
 
 			return result
 		}
 	}
 
-	if err := e.Store.Delete(ctx, currentManifests); err != nil {
+	report, err := e.Store.Delete(ctx, currentManifests)
+	addDeleteReport(&result, report)
+
+	if err != nil {
 		result.Error = err.Error()
 
 		return result
 	}
-
-	result.ObjectsDeleted = candidate.ObjectCount
-	result.BytesDeleted = candidate.Bytes
 
 	return result
 }
@@ -695,20 +719,20 @@ func (e Executor) deletePrefixSnapshot(
 		return result
 	}
 
-	if err := validator.validate(ctx, candidate, time.Now()); err != nil {
+	if err := validator.validate(ctx, candidate); err != nil {
 		result.Error = fmt.Sprintf("final Kubernetes recheck: %v", err)
 		return result
 	}
 
 	if len(current) > 0 {
-		if err := e.Store.Delete(ctx, current); err != nil {
+		report, err := e.Store.Delete(ctx, current)
+		addDeleteReport(&result, report)
+
+		if err != nil {
 			result.Error = err.Error()
 			return result
 		}
 	}
-
-	result.ObjectsDeleted = candidate.ObjectCount
-	result.BytesDeleted = candidate.Bytes
 
 	return result
 }
@@ -744,22 +768,29 @@ func (e Executor) deleteRepositoryStray(
 		return result
 	}
 
-	if err := validator.validate(ctx, candidate, time.Now()); err != nil {
+	if err := validator.validate(ctx, candidate); err != nil {
 		result.Error = fmt.Sprintf("final Kubernetes recheck: %v", err)
 		return result
 	}
 
 	if len(current) > 0 {
-		if err := e.Store.Delete(ctx, current); err != nil {
+		report, err := e.Store.Delete(ctx, current)
+		addDeleteReport(&result, report)
+
+		if err != nil {
 			result.Error = err.Error()
 			return result
 		}
 	}
 
-	result.ObjectsDeleted = candidate.ObjectCount
-	result.BytesDeleted = candidate.Bytes
-
 	return result
+}
+
+func addDeleteReport(result *domain.DeleteResult, report domain.DeleteReport) {
+	for _, object := range report.Deleted {
+		result.ObjectsDeleted++
+		result.BytesDeleted += object.Size
+	}
 }
 
 func normalizedCandidateKind(kind domain.CandidateKind) domain.CandidateKind {
@@ -806,6 +837,7 @@ func sameObjectSnapshot(planned, current []domain.Object) bool {
 
 		plannedObject, exists := plannedByID[identity]
 		if !exists || plannedObject.Size != object.Size || plannedObject.ETag != object.ETag ||
+			plannedObject.Generation != object.Generation ||
 			plannedObject.DeleteMarker != object.DeleteMarker ||
 			!plannedObject.LastModified.Equal(object.LastModified) {
 			return false

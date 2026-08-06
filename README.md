@@ -16,15 +16,15 @@ Mount 模式采用“所选 BackupRepo Bucket 归当前 Kubernetes 集群独占�
 6. 目录存在清单时，只接受 `deletionPolicy: Delete` 和 `Retain`；`Retain` 默认受保护，未知值归类为无效清单。缺失清单时使用目录布局、Backup CR inventory、对象年龄和完整快照作为删除依据。
 7. Mount 模式先使用 S3 delimiter 发现严格的 `pvc-<canonical UUID>/` 根，再使用 PVC UID、PV 名称和 CSI `volumeHandle` 建立当前卷根所有权索引。当前用户 PVC/PV 根直接保护并跳过内部列表。
 8. 目录没有被仍需保留的增量/差异备份作为 parent 或 base 引用。
-9. 执行计划使用第二次对象遍历生成最终快照，重新计算删除汇总并复核最小年龄；执行开始前统一刷新一次 Kubernetes inventory。每个聚合根和 `repository-stray` 在完成最终 S3 快照后再次刷新 BackupRepo、Backup、Restore、PVC、PV 和 StorageClass，精确比较 namespace 到对象根的映射；并发候选可以共享刷新开始时间晚于各自 S3 快照的 inventory。单 Backup 候选在首个删除请求前再次精确查询对应 Backup CR。
+9. 执行计划使用第二次对象遍历生成最终快照，重新计算删除汇总并复核最小年龄；执行开始时刷新一次 Kubernetes inventory。首个候选完成最终 S3 快照后再统一刷新 BackupRepo、Backup、Restore、PVC、PV 和 StorageClass，并精确比较 namespace 到对象根的映射；同一次执行的候选共享该最终 inventory。真实 Kubernetes inventory 的 Backup map 覆盖单 Backup 候选复核，轻量端口实现可使用 `BackupExists` 回退。
 10. `--bucket-versioning=auto` 会在删除前核对 Bucket versioning 状态；显式状态会作为运维声明写入计划。两种模式都会复核目录完整对象快照；存在清单时额外复核清单 ETag 和修改时间，版本化 Bucket 按 VersionID 精确删除。
-11. 无版本 Bucket 在删除前执行完整对象快照复核，删除操作仍存在最终检查到服务端执行之间的覆盖竞态。
+11. 无版本 Bucket 在删除前执行完整对象快照复核。GCS 额外保存每个对象的 generation，并把 generation 作为 `VersionId` 提交给 Multi-Object Delete，实现对象身份约束。
 
 当前 PVC 或 `Bound` PV 对应的 repository 根保持当前状态。claim 名匹配 BackupRepo backup PVC 或 pre-check PVC、同时处于 Released 等历史状态的 PV 根会进入历史 repository 判定。程序只列出根下 namespace 和 `clusterName-clusterUUID` 两层 topology，并用 Backup CR `status.path`、`status.kopiaRepoPath`、cluster UID、Restore、增量依赖和存储保护做引用审计。整个历史根没有引用时生成唯一的 `orphan-repository-root`；其内部 backup、`orphan-cluster-root` 和 `repository-stray` 候选全部省略。
 
 历史根包含引用时继续使用细粒度流程。Mount 模式在 `pvc-<UUID>/<namespace>/` 下发现名称以 canonical UUID 结尾的 cluster 目录后，先查询内存中的 Backup CR inventory。相同 namespace 下存在 cluster UID 标签匹配、`status.path`/`status.kopiaRepoPath` 重叠、定位信息不完整、活跃 Restore 引用或 live backup 依赖时，程序继续深入扫描并按单个备份分类。没有任何引用时，整个目录归类为 `orphan-cluster-root`，plan 阶段记录 `deferredScan: true` 并跳过递归 S3 List。
 
-真实 prune 会枚举 `orphan-repository-root` 或 `orphan-cluster-root` 的全部对象，复核 `--min-age`，读取其中的当前 manifest 并继续执行 Retain、清单有效性和 Kubernetes 保护检查，然后生成精确删除快照。最终对象快照完成后执行候选级 inventory 复核；新出现的 Backup 路径、cluster UID、Restore、依赖、当前 PVC/PV 或存储保护都会使该候选失效。Kubernetes 复核与 S3 删除属于两个独立系统，两次操作之间仍存在无法原子关闭的竞态窗口。只覆盖整根候选一部分的 `--prefix` 会把候选置为 protected。
+真实 prune 会枚举 `orphan-repository-root` 或 `orphan-cluster-root` 的全部对象，复核 `--min-age`，读取其中的当前 manifest 并继续执行 Retain、清单有效性和 Kubernetes 保护检查，然后生成精确删除快照。首个最终对象快照完成后统一刷新 inventory；新出现的 Backup 路径、cluster UID、Restore、依赖、当前 PVC/PV 或存储保护都会使候选失效。Kubernetes 复核与 S3 删除属于两个独立系统，两次操作之间存在竞态窗口。只覆盖整根候选一部分的 `--prefix` 会把候选置为 protected。
 
 `repository-stray` 表示仓库根下的松散对象、无效 namespace 目录、无效 cluster 目录，以及 cluster 内未形成规范 `component/backupName/` 边界的共享备份数据。规范备份目录统一使用 `type=backup`，由 `state` 区分 `live`、`orphan`、`retained` 和其他安全状态。`Size=0` 且 Key 以 `/` 结尾的 S3 CSI 目录标记属于结构元数据，程序会忽略标记对象并继续扫描其子目录。该类型默认保护；`--delete-repository-stray` 开启后才进入最小年龄和精确对象快照删除流程。非 `pvc-<UUID>/` 顶层对象保持在扫描范围外。PVC 到 S3 前缀的映射缺失、StorageClass/PV/PVC 权限不足或资源状态异常会产生 execution blocker，真实删除会停止。
 
@@ -82,6 +82,8 @@ Helm Chart 默认创建基础最小只读权限：
 S3 读取计划需要 `s3:ListBucket` 和 `s3:GetObject`。默认 `--bucket-versioning=auto` 还需要 `s3:GetBucketVersioning`；显式声明版本状态会跳过该请求。启用 `--purge-versions` 时还需要 `s3:ListBucketVersions`。真实清理增加 `s3:DeleteObject`，永久删除历史版本增加 `s3:DeleteObjectVersion`；Bucket 级动作绑定 Bucket ARN，对象级动作可限制到 BackupRepo PVC/PV 映射出的对象根。
 
 GCS XML API 的 `?versioning` 属于 Bucket metadata 请求，HMAC Service Account 需要 `storage.buckets.get`。可以在目标 Bucket 上授予 `roles/storage.legacyBucketReader`，或使用包含该权限的自定义角色。已经通过独立证据确认关闭版本管理时，可以使用 `--bucket-versioning=disabled` 跳过该权限和请求。
+
+GCS Soft Delete 与 XML API object versioning 是两项独立能力。Bucket 启用 Soft Delete 时，清理请求删除 live generation，Cloud Storage 按 Bucket 的 Soft Delete retention 保存可恢复副本；`--bucket-versioning` 只描述 object versioning 状态。
 
 程序会精确识别 `googleapis.com` 下的 Cloud Storage endpoint，并自动启用 AWS SDK Go v2 的 GCS SigV4 兼容层：签名前移除 GCS canonicalization 不接受的 `Accept-Encoding`、`Amz-Sdk-Invocation-Id` 和 `Amz-Sdk-Request`，签名后恢复 `Accept-Encoding: identity`。该行为同时覆盖列表、分页、对象读取和删除请求，其他 S3-compatible endpoint 保持标准 AWS SDK 行为。
 
@@ -203,6 +205,7 @@ kbbackup-prune prune \
 --namespace=dataflow-system   只扫描该 namespace 的 BackupRepo PVC 对象根
 --prefix=pvc-uuid/ns/cluster  进一步缩小完整对象前缀，必须位于选定 PVC 对象根内
 --concurrency=4               备份目录并发数
+--timeout=30m                 整个命令的最长执行时间；大批量清理可显式提高
 --delete-repository-stray     允许删除 repository-stray，默认保护
 --show-all                    展示 live 和硬保护资源；默认只展示存在清理路径的候选
 --bucket-versioning=auto      自动查询版本状态；可显式声明 disabled/enabled/suspended
@@ -305,7 +308,9 @@ make helm-lint
 | MinIO | `RELEASE.2025-09-07T16-13-09Z` | 接受 AWS SDK 默认 CRC32 | 忽略 ObjectIdentifier ETag |
 | RustFS | `1.0.0-beta.12` | 接受 AWS SDK 默认 CRC32 | 忽略 ObjectIdentifier ETag |
 
-AWS SDK v2 的 `DeleteObjectsInput.ChecksumAlgorithm=MD5` 当前会在客户端校验阶段返回 `unknown checksum algorithm, MD5`。适配器通过 Smithy middleware 为每个批量删除请求计算标准 `Content-MD5`，同时兼容以上三种服务，并保留每批最多 1000 个对象的批量删除。测试覆盖 SDK 默认 CRC32、显式 MD5、适配器校验头、ETag 条件行为、对象读取、分页接口、普通删除、Bucket 版本控制、历史版本永久删除，以及 GCS endpoint 识别和 SigV4 signed headers。Docker 不可用时测试会 skip；CI 可设置 `REQUIRE_TESTCONTAINERS=true` 强制执行。
+AWS SDK v2 的 `DeleteObjectsInput.ChecksumAlgorithm=MD5` 当前会在客户端校验阶段返回 `unknown checksum algorithm, MD5`。适配器移除该操作的 flexible-checksum middleware，再通过 Smithy middleware 为每个批量删除请求计算标准 `Content-MD5`，同时兼容以上三种服务，并保留每批最多 1000 个对象的批量删除。测试覆盖 MD5 与 flexible checksum 的排他性、ETag 条件行为、对象读取、分页接口、普通删除、Bucket 版本控制、历史版本永久删除，以及 GCS endpoint、generation、版本列表互操作请求头和 SigV4 signed headers。Docker 不可用时测试会 skip；CI 可设置 `REQUIRE_TESTCONTAINERS=true` 强制执行。
+
+GCS XML API 的 Multi-Object Delete 请求体使用 `Key` 和可选 `VersionId`。适配器从普通对象列表的 `<Generation>` 保存对象 generation，版本列表请求携带并签名 `x-goog-interop-list-objects-format: enabled`，删除时把 generation 映射为 `VersionId`。缺少 generation 或 VersionID 的 GCS 对象会停止删除并报告身份缺失。其他 S3 兼容服务使用带 ETag 的批量删除；`MalformedMultiObjectDeleteRequest` 会原样返回，便于按服务能力显式处理。`Quiet=false` 让执行汇总准确记录批量请求中的部分成功。大批量任务可提高 `--timeout` 和 `--concurrency`，例如 `--timeout=2h --concurrency=16`。
 
 ## 架构
 

@@ -191,7 +191,9 @@ func runS3CompatibilitySuite(
 	require.NoError(t, err)
 	require.NotEmpty(t, stat.ETag)
 	require.EqualValues(t, len("payload"), stat.Size)
-	require.NoError(t, store.Delete(ctx, objects))
+
+	_, err = store.Delete(ctx, objects)
+	require.NoError(t, err)
 	objects, err = store.List(ctx, "root", false)
 	require.NoError(t, err)
 	require.Empty(t, objects)
@@ -209,7 +211,8 @@ func runS3CompatibilitySuite(
 	versions, err := store.List(ctx, "versioned", true)
 	require.NoError(t, err)
 	require.Len(t, versions, 2)
-	require.NoError(t, store.Delete(ctx, versions))
+	_, err = store.Delete(ctx, versions)
+	require.NoError(t, err)
 	versions, err = store.List(ctx, "versioned", true)
 	require.NoError(t, err)
 	require.Empty(t, versions)
@@ -235,7 +238,8 @@ func runS3CompatibilitySuite(
 	hiddenVersions, err := store.List(ctx, "hidden-root", true)
 	require.NoError(t, err)
 	require.Len(t, hiddenVersions, 2)
-	require.NoError(t, store.Delete(ctx, hiddenVersions))
+	_, err = store.Delete(ctx, hiddenVersions)
+	require.NoError(t, err)
 	hiddenVersions, err = store.List(ctx, "hidden-root", true)
 	require.NoError(t, err)
 	require.Empty(t, hiddenVersions)
@@ -266,7 +270,7 @@ func deleteWithConditionalETag(
 	require.NoError(t, err)
 	putObject(t, ctx, client, key, "after")
 
-	deleteErr := store.Delete(ctx, []domain.Object{planned})
+	_, deleteErr := store.Delete(ctx, []domain.Object{planned})
 	_, statErr := store.Stat(ctx, key)
 	remains := statErr == nil
 
