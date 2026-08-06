@@ -31,6 +31,15 @@ type partialDeleteStore struct {
 	*memoryStore
 }
 
+type statOverrideStore struct {
+	*memoryStore
+	stat domain.Object
+}
+
+func (s *statOverrideStore) Stat(_ context.Context, _ string) (domain.Object, error) {
+	return s.stat, nil
+}
+
 func (s *partialDeleteStore) Delete(
 	_ context.Context,
 	objects []domain.Object,
@@ -809,6 +818,74 @@ func TestExecutorDeletesCurrentManifestVersionLast(t *testing.T) {
 	require.Equal(t, "data", path.Base(store.deleteCalls[0][0].Key))
 	require.Equal(t, "old", store.deleteCalls[1][0].VersionID)
 	require.Equal(t, "current", store.deleteCalls[2][0].VersionID)
+}
+
+func TestManifestRecheckUsesStableIdentityBeforeTimestamp(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.August, 6, 12, 0, 0, 123456789, time.UTC)
+	candidate := executablePlan(now).Candidates[0]
+	candidate.ManifestGeneration = "123"
+	marker := domain.Object{
+		Key:          candidate.ManifestKey,
+		ETag:         candidate.ManifestETag,
+		Generation:   "123",
+		LastModified: now.Truncate(time.Second),
+	}
+
+	// GCS ListObjects and HEAD expose different timestamp precision for the
+	// same generation. The generation keeps the recheck stable.
+	require.False(t, manifestChangedAfterPlanning(candidate, marker))
+
+	marker.Generation = "124"
+	require.True(t, manifestChangedAfterPlanning(candidate, marker))
+}
+
+func TestManifestRecheckRetainsTimestampFallbackWithoutStableIdentity(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.August, 6, 12, 0, 0, 123456789, time.UTC)
+	candidate := executablePlan(now).Candidates[0]
+	marker := domain.Object{
+		Key:          candidate.ManifestKey,
+		ETag:         candidate.ManifestETag,
+		LastModified: now.Truncate(time.Second),
+	}
+
+	// AWS plans based on an unversioned ListObjectsV2 response have ETag and
+	// time as their available identity.
+	require.True(t, manifestChangedAfterPlanning(candidate, marker))
+	marker.LastModified = candidate.LastModified
+	require.False(t, manifestChangedAfterPlanning(candidate, marker))
+}
+
+func TestExecutorAcceptsGCSHeadTimestampPrecisionDifference(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.August, 6, 12, 0, 0, 123456789, time.UTC)
+	plan := executablePlan(now)
+	candidate := &plan.Candidates[0]
+	candidate.ManifestGeneration = "123"
+	candidate.Objects[0].Generation = "123"
+	store := &statOverrideStore{
+		memoryStore: &memoryStore{
+			current: append([]domain.Object(nil), candidate.Objects...),
+		},
+		stat: domain.Object{
+			Key:          candidate.ManifestKey,
+			ETag:         candidate.ManifestETag,
+			Generation:   "123",
+			LastModified: now.Truncate(time.Second),
+		},
+	}
+
+	execution, err := (Executor{Kube: &fakeKube{}, Store: store}).Run(
+		context.Background(), plan, ExecuteOptions{Concurrency: 1},
+	)
+	require.NoError(t, err)
+	require.Len(t, execution.Results, 1)
+	require.Equal(t, 2, execution.Results[0].ObjectsDeleted)
+	require.Len(t, store.deleteCalls, 2)
 }
 
 func TestExecutorRejectsVersioningChangeAfterPlanning(t *testing.T) {

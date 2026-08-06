@@ -203,6 +203,8 @@ type Candidate struct {
 	FullScopeSnapshot    bool            `json:"-"`
 	ManifestKey          string          `json:"manifestKey"`
 	ManifestETag         string          `json:"manifestETag,omitempty"`
+	ManifestVersionID    string          `json:"manifestVersionId,omitempty"`
+	ManifestGeneration   string          `json:"manifestGeneration,omitempty"`
 	CreatedAt            time.Time       `json:"createdAt"`
 	LastModified         time.Time       `json:"lastModified"`
 	DeletionPolicy       string          `json:"deletionPolicy,omitempty"`

@@ -326,12 +326,14 @@ func (p Planner) readCandidate(
 	prefix := strings.TrimSuffix(marker.Key, "/"+opts.ManifestName)
 
 	candidate := domain.Candidate{
-		Kind:         domain.CandidateBackup,
-		Prefix:       cleanKey(prefix),
-		ManifestKey:  marker.Key,
-		ManifestETag: marker.ETag,
-		LastModified: marker.LastModified,
-		State:        domain.StateInvalidManifest,
+		Kind:               domain.CandidateBackup,
+		Prefix:             cleanKey(prefix),
+		ManifestKey:        marker.Key,
+		ManifestETag:       marker.ETag,
+		ManifestVersionID:  marker.VersionID,
+		ManifestGeneration: marker.Generation,
+		LastModified:       marker.LastModified,
+		State:              domain.StateInvalidManifest,
 	}
 	if strings.Trim(prefix, "/") != candidate.Prefix {
 		candidate.Reason = "manifest object key is not canonical"
