@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   release:
-    name: Release AI Proxy
+    name: Release
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -57,7 +57,7 @@ jobs:
         run: |
           export GOOS=${{ matrix.targets.GOOS }}
           export GOARCH=${{ matrix.targets.GOARCH }}
-          go build -trimpath -ldflags "-s -w" -o kbbackup-prune-${{ matrix.targets.GOOS }}-${{ matrix.targets.GOARCH }}${{ matrix.targets.EXT }}
+          go build -trimpath -ldflags "-s -w" -o "kbbackup-prune-${{ matrix.targets.GOOS }}-${{ matrix.targets.GOARCH }}${{ matrix.targets.EXT }}" ./cmd/kbbackup-prune
 
       - name: Get release meta
         id: release_meta
