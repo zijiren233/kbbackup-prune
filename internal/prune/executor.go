@@ -616,7 +616,7 @@ func (e Executor) deleteBackupCandidate(
 		return result
 	}
 
-	if marker.ETag != candidate.ManifestETag || !marker.LastModified.Equal(candidate.LastModified) {
+	if manifestChangedAfterPlanning(candidate, marker) {
 		result.Error = "manifest changed after planning"
 		return result
 	}
@@ -642,7 +642,7 @@ func (e Executor) deleteBackupCandidate(
 	currentManifests := make([]domain.Object, 0, 1)
 	for _, object := range candidate.Objects {
 		if object.Key == candidate.ManifestKey {
-			if object.VersionID == marker.VersionID {
+			if sameObjectVersion(object, marker) {
 				currentManifests = append(currentManifests, object)
 			} else {
 				historicalManifests = append(historicalManifests, object)
@@ -697,6 +697,57 @@ func (e Executor) deleteBackupCandidate(
 	}
 
 	return result
+}
+
+// manifestChangedAfterPlanning compares the manifest's content and stable
+// object identity. LastModified is intentionally excluded: object listings
+// often expose sub-second precision while HEAD responses use HTTP-date
+// second precision.
+func manifestChangedAfterPlanning(candidate domain.Candidate, marker domain.Object) bool {
+	if candidate.ManifestETag == "" || marker.ETag == "" || candidate.ManifestETag != marker.ETag {
+		return true
+	}
+
+	if !sameObjectVersionFields(
+		candidate.ManifestVersionID,
+		candidate.ManifestGeneration,
+		marker,
+	) {
+		return true
+	}
+
+	// S3 plans created from ListObjectsV2 have no version identity. Keep the
+	// timestamp guard for that case because a later version can reuse an ETag.
+	if candidate.ManifestVersionID == "" && candidate.ManifestGeneration == "" {
+		return !marker.LastModified.Equal(candidate.LastModified)
+	}
+
+	return false
+}
+
+func sameObjectVersion(planned, current domain.Object) bool {
+	return sameObjectVersionFields(planned.VersionID, planned.Generation, current)
+}
+
+func sameObjectVersionFields(
+	plannedVersionID, plannedGeneration string,
+	current domain.Object,
+) bool {
+	if plannedVersionID == "" && plannedGeneration == "" {
+		return true
+	}
+
+	if plannedVersionID != "" &&
+		current.VersionID != plannedVersionID && current.Generation != plannedVersionID {
+		return false
+	}
+
+	if plannedGeneration != "" &&
+		current.Generation != plannedGeneration && current.VersionID != plannedGeneration {
+		return false
+	}
+
+	return true
 }
 
 func (e Executor) deletePrefixSnapshot(

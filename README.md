@@ -17,7 +17,7 @@ Mount 模式采用“所选 BackupRepo Bucket 归当前 Kubernetes 集群独占�
 7. Mount 模式先使用 S3 delimiter 发现严格的 `pvc-<canonical UUID>/` 根，再使用 PVC UID、PV 名称和 CSI `volumeHandle` 建立当前卷根所有权索引。当前用户 PVC/PV 根直接保护并跳过内部列表。
 8. 目录没有被仍需保留的增量/差异备份作为 parent 或 base 引用。
 9. 执行计划使用第二次对象遍历生成最终快照，重新计算删除汇总并复核最小年龄；执行开始时刷新一次 Kubernetes inventory。首个候选完成最终 S3 快照后再统一刷新 BackupRepo、Backup、Restore、PVC、PV 和 StorageClass，并精确比较 namespace 到对象根的映射；同一次执行的候选共享该最终 inventory。真实 Kubernetes inventory 的 Backup map 覆盖单 Backup 候选复核，轻量端口实现可使用 `BackupExists` 回退。
-10. `--bucket-versioning=auto` 会在删除前核对 Bucket versioning 状态；显式状态会作为运维声明写入计划。两种模式都会复核目录完整对象快照；存在清单时额外复核清单 ETag 和修改时间，版本化 Bucket 按 VersionID 精确删除。
+10. `--bucket-versioning=auto` 会在删除前核对 Bucket versioning 状态；显式状态会作为运维声明写入计划。两种模式都会复核目录完整对象快照；存在清单时额外复核清单 ETag 和 VersionID/GCS generation，时间字段用于展示和年龄判断，版本化 Bucket 按 VersionID 精确删除。
 11. 无版本 Bucket 在删除前执行完整对象快照复核。GCS 额外保存每个对象的 generation，并把 generation 作为 `VersionId` 提交给 Multi-Object Delete，实现对象身份约束。
 
 当前 PVC 或 `Bound` PV 对应的 repository 根保持当前状态。claim 名匹配 BackupRepo backup PVC 或 pre-check PVC、同时处于 Released 等历史状态的 PV 根会进入历史 repository 判定。程序只列出根下 namespace 和 `clusterName-clusterUUID` 两层 topology，并用 Backup CR `status.path`、`status.kopiaRepoPath`、cluster UID、Restore、增量依赖和存储保护做引用审计。整个历史根没有引用时生成唯一的 `orphan-repository-root`；其内部 backup、`orphan-cluster-root` 和 `repository-stray` 候选全部省略。
