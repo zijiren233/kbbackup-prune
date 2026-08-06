@@ -22,9 +22,9 @@ Mount 模式采用“所选 BackupRepo Bucket 归当前 Kubernetes 集群独占�
 
 当前 PVC 或 `Bound` PV 对应的 repository 根保持当前状态。claim 名匹配 BackupRepo backup PVC 或 pre-check PVC、同时处于 Released 等历史状态的 PV 根会进入历史 repository 判定。程序只列出根下 namespace 和 `clusterName-clusterUUID` 两层 topology，并用 Backup CR `status.path`、`status.kopiaRepoPath`、cluster UID、Restore、增量依赖和存储保护做引用审计。整个历史根没有引用时生成唯一的 `orphan-repository-root`；其内部 backup、`orphan-cluster-root` 和 `repository-stray` 候选全部省略。
 
-历史根包含引用时继续使用细粒度流程。Mount 模式在 `pvc-<UUID>/<namespace>/` 下发现名称以 canonical UUID 结尾的 cluster 目录后，先查询内存中的 Backup CR inventory。相同 namespace 下存在 cluster UID 标签匹配、`status.path`/`status.kopiaRepoPath` 重叠、定位信息不完整、活跃 Restore 引用或 live backup 依赖时，程序继续深入扫描并按单个备份分类。没有任何引用时，整个目录归类为 `orphan-cluster-root`，plan 阶段记录 `deferredScan: true` 并跳过递归 S3 List。
+历史根包含引用时继续使用细粒度流程。Mount 模式在 `pvc-<UUID>/<namespace>/` 下发现名称以 canonical UUID 结尾的 cluster 目录后，先查询内存中的 Backup CR inventory。相同 namespace 下存在 cluster UID 标签匹配、`status.path`/`status.kopiaRepoPath` 重叠、定位信息不完整、活跃 Restore 引用或 live backup 依赖时，程序继续深入扫描并按单个备份分类。没有任何引用时，程序扫描整个 `orphan-cluster-root`，按 `component/backupName` 拆分 Backup 候选，逐个应用最小年龄、manifest、依赖和 Kubernetes 保护检查；只覆盖 root 一部分的 `--prefix` 或存在存储保护时保留 root 级 protected 候选。
 
-真实 prune 会枚举 `orphan-repository-root` 或 `orphan-cluster-root` 的全部对象，复核 `--min-age`，读取其中的当前 manifest 并继续执行 Retain、清单有效性和 Kubernetes 保护检查，然后生成精确删除快照。首个最终对象快照完成后统一刷新 inventory；新出现的 Backup 路径、cluster UID、Restore、依赖、当前 PVC/PV 或存储保护都会使候选失效。Kubernetes 复核与 S3 删除属于两个独立系统，两次操作之间存在竞态窗口。只覆盖整根候选一部分的 `--prefix` 会把候选置为 protected。
+真实 prune 会枚举 `orphan-repository-root` 的全部对象，以及 `orphan-cluster-root` 下每个 Backup 候选的全部对象，复核 `--min-age`，读取其中的当前 manifest 并继续执行 Retain、清单有效性和 Kubernetes 保护检查，然后生成精确删除快照。首个最终对象快照完成后统一刷新 inventory；新出现的 Backup 路径、cluster UID、Restore、依赖、当前 PVC/PV 或存储保护都会使候选失效。Kubernetes 复核与 S3 删除属于两个独立系统，两次操作之间存在竞态窗口。只覆盖整根候选一部分的 `--prefix` 会把候选置为 protected。
 
 `repository-stray` 表示仓库根下的松散对象、无效 namespace 目录、无效 cluster 目录，以及 cluster 内未形成规范 `component/backupName/` 边界的共享备份数据。规范备份目录统一使用 `type=backup`，由 `state` 区分 `live`、`orphan`、`retained` 和其他安全状态。`Size=0` 且 Key 以 `/` 结尾的 S3 CSI 目录标记属于结构元数据，程序会忽略标记对象并继续扫描其子目录。该类型默认保护；`--delete-repository-stray` 开启后才进入最小年龄和精确对象快照删除流程。非 `pvc-<UUID>/` 顶层对象保持在扫描范围外。PVC 到 S3 前缀的映射缺失、StorageClass/PV/PVC 权限不足或资源状态异常会产生 execution blocker，真实删除会停止。
 
@@ -213,7 +213,7 @@ kbbackup-prune prune \
 --debug                       向 stderr 输出脱敏连接诊断
 ```
 
-已枚举候选的对象数量和字节数直接来自 `ListObjectsV2` 或 `ListObjectVersions` 响应，用于审计展示和执行快照一致性校验。`orphan-repository-root` 和 `orphan-cluster-root` 在只读 plan 中显示 `OBJECTS=deferred`；真实 prune 生成快照后才显示准确数量。manifest 安全检查会读取每个当前 `kubeblocks-backup.json`，普通数据对象不会增加 HEAD/Get 请求。
+已枚举候选的对象数量和字节数直接来自 `ListObjectsV2` 或 `ListObjectVersions` 响应，用于审计展示和执行快照一致性校验。`orphan-repository-root` 在只读 plan 中显示 `OBJECTS=deferred`；`orphan-cluster-root` 会在发现阶段展开为单个 Backup 候选并显示对象数量，真实 prune 再为可清理候选生成精确快照。manifest 安全检查会读取每个当前 `kubeblocks-backup.json`，普通数据对象不会增加 HEAD/Get 请求。
 
 Table 输出中的 `Discovered PVC roots` 统计 bucket 根部发现的全部 canonical `pvc-UUID` 前缀，并按 BackupRepo repository 根、受保护用户卷、无主卷和其他根分类。当前 PVC、历史 Released BackupRepo PV 和当前 BackupRepo pre-check PV 都会保留 repository 身份；claim 名不同的用户卷保持硬保护，程序跳过其内部对象枚举。
 
@@ -325,4 +325,4 @@ internal/prune            清单校验、规划、安全门和删除执行
 charts/kbbackup-prune     Job-first Helm 部署、RBAC 和可选 CronJob
 ```
 
-清理器会从已引用 cluster 中直接发现规范的 `component/backupName/` 目录；缺少 `kubeblocks-backup.json` 且没有 Backup CR 的目录归类为 `type=backup,state=orphan`。现存 Backup CR 对应的目录归类为 `type=backup,state=live`。cluster 内缺少单个备份边界的共享数据和无效仓库目录归类为 `repository-stray`，并默认保护。格式正确且没有 Backup CR 引用的 cluster 目录归类为 `orphan-cluster-root`。没有任何引用的历史 BackupRepo PV 根归类为单个 `orphan-repository-root` 并省略内层候选。孤儿卷根具备严格的 `pvc-<UUID>/` 形状且当前没有 PVC/PV 映射时归类为 `orphan-volume-root`。
+清理器会从已引用 cluster 和无当前 Backup CR 引用的 `orphan-cluster-root` 中发现规范的 `component/backupName/` 目录；缺少 `kubeblocks-backup.json` 且没有 Backup CR 的目录归类为 `type=backup,state=orphan`。现存 Backup CR 对应的目录归类为 `type=backup,state=live`。cluster 内缺少单个备份边界的共享数据和无效仓库目录归类为 `repository-stray`，并默认保护。没有任何引用的历史 BackupRepo PV 根归类为单个 `orphan-repository-root` 并省略内层候选。孤儿卷根具备严格的 `pvc-<UUID>/` 形状且当前没有 PVC/PV 映射时归类为 `orphan-volume-root`。

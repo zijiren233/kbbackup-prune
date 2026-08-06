@@ -429,7 +429,9 @@ func (b *volumePlanBuilder) scanRepositoryNamespace(
 			strings.TrimSuffix(clusterPrefix, "/"),
 			clusterUID,
 		) == "" {
-			b.addOrphanClusterRoot(clusterPrefix)
+			if err := b.scanOrphanClusterRoot(clusterPrefix); err != nil {
+				return err
+			}
 
 			continue
 		}
@@ -468,6 +470,24 @@ func (b *volumePlanBuilder) addOrphanClusterRoot(prefix string) {
 	}
 
 	b.plan.Candidates = append(b.plan.Candidates, candidate)
+}
+
+func (b *volumePlanBuilder) scanOrphanClusterRoot(prefix string) error {
+	prefix = strings.TrimSuffix(prefix, "/")
+
+	if b.requested != "" && !containsPrefix(b.requested, prefix) {
+		b.addOrphanClusterRoot(prefix)
+
+		return nil
+	}
+
+	if matchingProtection(prefix, b.inventory.Protections) != nil {
+		b.addOrphanClusterRoot(prefix)
+
+		return nil
+	}
+
+	return b.scanBackupCluster(prefix)
 }
 
 func (b *volumePlanBuilder) scanBackupCluster(clusterPrefix string) error {

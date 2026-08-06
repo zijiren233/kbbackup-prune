@@ -1147,7 +1147,7 @@ func TestSupportsVolumeDiscoveryRequiresCanonicalRepositoryRoot(t *testing.T) {
 	require.True(t, supportsVolumeDiscovery(volumeInventory().VolumeRoots))
 }
 
-func TestVolumePlannerDefersUnreferencedClusterScan(t *testing.T) {
+func TestVolumePlannerDiscoversUnreferencedClusterBackups(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, time.August, 5, 12, 0, 0, 0, time.UTC)
@@ -1160,14 +1160,14 @@ func TestVolumePlannerDefersUnreferencedClusterScan(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	candidate := candidateByKind(t, plan, domain.CandidateOrphanClusterRoot)
-	require.Equal(t, clusterPrefix(), candidate.Prefix)
+	candidate := candidateByPrefix(t, plan, clusterPrefix()+"/postgresql/orphan")
+	require.Equal(t, domain.CandidateBackup, candidate.Kind)
 	require.Equal(t, domain.StateOrphan, candidate.State)
-	require.True(t, candidate.DeferredScan)
-	require.Zero(t, candidate.ObjectCount)
+	require.False(t, candidate.DeferredScan)
+	require.Equal(t, 2, candidate.ObjectCount)
 	require.Empty(t, candidate.Objects)
-	require.NotContains(t, candidateKinds(plan), domain.CandidateBackup)
-	requireClusterListSkipped(t, store)
+	require.NotContains(t, candidateKinds(plan), domain.CandidateOrphanClusterRoot)
+	require.Contains(t, store.listCalls, clusterPrefix())
 }
 
 func TestVolumePlannerCapturesUnreferencedClusterForDeletion(t *testing.T) {
@@ -1183,12 +1183,132 @@ func TestVolumePlannerCapturesUnreferencedClusterForDeletion(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	candidate := candidateByKind(t, plan, domain.CandidateOrphanClusterRoot)
+	candidate := candidateByPrefix(t, plan, clusterPrefix()+"/postgresql/orphan")
+	require.Equal(t, domain.CandidateBackup, candidate.Kind)
 	require.Equal(t, domain.StateOrphan, candidate.State)
 	require.False(t, candidate.DeferredScan)
-	require.Len(t, candidate.Objects, 3)
-	require.Equal(t, 3, candidate.ObjectCount)
+	require.Len(t, candidate.Objects, 2)
+	require.Equal(t, 2, candidate.ObjectCount)
 	require.Contains(t, plan.StateCounts, domain.StateOrphan)
+}
+
+func TestVolumePlannerSplitsOldAndYoungBackupsWithinOrphanCluster(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.August, 5, 12, 0, 0, 0, time.UTC)
+	cluster := clusterPrefix()
+	oldPrefix := cluster + "/postgresql/orphan"
+	youngPrefix := cluster + "/postgresql/young"
+	youngManifest := youngPrefix + "/" + domain.DefaultManifest
+	store := volumeStore(t, now)
+	store.current = append(store.current,
+		domain.Object{
+			Key:          youngManifest,
+			Size:         100,
+			ETag:         "young-manifest",
+			LastModified: now.Add(-time.Hour),
+		},
+		domain.Object{
+			Key:          youngPrefix + "/data",
+			Size:         200,
+			ETag:         "young-data",
+			LastModified: now.Add(-time.Hour),
+		},
+	)
+	store.bodies[youngManifest] = backupManifestForNamespace(
+		t,
+		"repo",
+		"dataflow-system",
+		"young",
+		"dataflow-system/test-db-"+testClusterUID+"/postgresql/young",
+		now.Add(-time.Hour), domain.DeletionPolicyDelete,
+	)
+
+	plan, err := (Planner{Store: store, Now: func() time.Time { return now }}).Build(
+		context.Background(), inventoryWithoutClusterBackups(), PlanOptions{
+			Repository: "repo", Bucket: "bucket", MinAge: 7 * 24 * time.Hour,
+			CaptureObjects: true, BucketVersioning: domain.BucketVersioningModeDisabled,
+		},
+	)
+	require.NoError(t, err)
+
+	oldCandidate := candidateByPrefix(t, plan, oldPrefix)
+	require.Equal(t, domain.CandidateBackup, oldCandidate.Kind)
+	require.Equal(t, domain.StateOrphan, oldCandidate.State)
+	require.Equal(t, 2, oldCandidate.ObjectCount)
+
+	youngCandidate := candidateByPrefix(t, plan, youngPrefix)
+	require.Equal(t, domain.CandidateBackup, youngCandidate.Kind)
+	require.Equal(t, domain.StateTooYoung, youngCandidate.State)
+	require.Equal(t, 2, youngCandidate.ObjectCount)
+	stray := candidateByPrefixAndKind(t, plan, cluster, domain.CandidateRepositoryStray)
+	require.Equal(t, domain.StateProtected, stray.State)
+	require.Contains(t, stray.Reason, "enable --delete-repository-stray")
+
+	require.NotContains(t, candidateKinds(plan), domain.CandidateOrphanClusterRoot)
+	// The plan also contains the independent unowned volume-root candidate.
+	require.Equal(t, oldCandidate.ObjectCount+1, plan.DeleteObjects)
+}
+
+func TestExecutorDeletesOldBackupAndKeepsYoungSiblingInOrphanCluster(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.August, 5, 12, 0, 0, 0, time.UTC)
+	cluster := clusterPrefix()
+	youngPrefix := cluster + "/postgresql/young"
+	youngManifest := youngPrefix + "/" + domain.DefaultManifest
+	store := volumeStore(t, now)
+
+	filtered := make([]domain.Object, 0, len(store.current))
+	for _, object := range store.current {
+		if !containsPrefix(testOrphanRoot, object.Key) {
+			filtered = append(filtered, object)
+		}
+	}
+
+	filtered = append(filtered,
+		domain.Object{
+			Key:          youngManifest,
+			Size:         100,
+			ETag:         "young-manifest",
+			LastModified: now.Add(-time.Hour),
+		},
+		domain.Object{
+			Key:          youngPrefix + "/data",
+			Size:         200,
+			ETag:         "young-data",
+			LastModified: now.Add(-time.Hour),
+		},
+	)
+	store.current = filtered
+	store.bodies[youngManifest] = backupManifestForNamespace(
+		t,
+		"repo",
+		"dataflow-system",
+		"young",
+		"dataflow-system/test-db-"+testClusterUID+"/postgresql/young",
+		now.Add(-time.Hour), domain.DeletionPolicyDelete,
+	)
+
+	plan, err := (Planner{Store: store, Now: func() time.Time { return now }}).Build(
+		context.Background(), inventoryWithoutClusterBackups(), PlanOptions{
+			Repository: "repo", Bucket: "bucket", MinAge: 7 * 24 * time.Hour,
+			CaptureObjects: true, BucketVersioning: domain.BucketVersioningModeDisabled,
+		},
+	)
+	require.NoError(t, err)
+
+	execution, err := (Executor{
+		Kube:  &fakeKube{inventory: inventoryWithoutClusterBackups()},
+		Store: store,
+	}).Run(context.Background(), plan, ExecuteOptions{Concurrency: 1})
+	require.NoError(t, err)
+	require.Equal(t, 2, execution.Results[0].ObjectsDeleted)
+	require.Len(t, store.deleted, 2)
+
+	for _, object := range store.deleted {
+		require.False(t, containsPrefix(youngPrefix, object.Key))
+	}
 }
 
 func TestVolumePlannerCapturesUnreferencedClusterVersions(t *testing.T) {
@@ -1213,10 +1333,10 @@ func TestVolumePlannerCapturesUnreferencedClusterVersions(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	candidate := candidateByKind(t, plan, domain.CandidateOrphanClusterRoot)
+	candidate := candidateByPrefix(t, plan, clusterPrefix()+"/postgresql/orphan")
 	require.Equal(t, domain.StateOrphan, candidate.State)
 	require.False(t, candidate.DeferredScan)
-	require.Len(t, candidate.Objects, 4)
+	require.Len(t, candidate.Objects, 3)
 }
 
 func TestVolumePlannerProtectsUnreferencedClusterContents(t *testing.T) {
@@ -1271,7 +1391,7 @@ func TestVolumePlannerProtectsUnreferencedClusterContents(t *testing.T) {
 			require.Equal(
 				t,
 				test.wantState,
-				candidateByKind(t, plan, domain.CandidateOrphanClusterRoot).State,
+				candidateByPrefix(t, plan, clusterPrefix()+"/postgresql/orphan").State,
 			)
 		})
 	}
@@ -1284,7 +1404,7 @@ func TestVolumePlannerProtectsYoungAndPartiallySelectedClusterRoot(t *testing.T)
 	store := volumeStore(t, now)
 
 	for i := range store.current {
-		if containsPrefix(clusterPrefix(), store.current[i].Key) {
+		if store.current[i].Key == clusterPrefix()+"/postgresql/orphan/data" {
 			store.current[i].LastModified = now
 			break
 		}
@@ -1300,7 +1420,7 @@ func TestVolumePlannerProtectsYoungAndPartiallySelectedClusterRoot(t *testing.T)
 	require.Equal(
 		t,
 		domain.StateTooYoung,
-		candidateByKind(t, plan, domain.CandidateOrphanClusterRoot).State,
+		candidateByPrefix(t, plan, clusterPrefix()+"/postgresql/orphan").State,
 	)
 
 	plan, err = (Planner{Store: volumeStore(t, now), Now: func() time.Time { return now }}).Build(
