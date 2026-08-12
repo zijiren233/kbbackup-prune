@@ -48,9 +48,9 @@ func TestDeleteUsesBatchesWithContentMD5(t *testing.T) {
 	t.Parallel()
 
 	var (
-		checks      []bool
-		conditional []bool
-		mutex       sync.Mutex
+		checks   []bool
+		standard []bool
+		mutex    sync.Mutex
 	)
 
 	server := httptest.NewServer(
@@ -78,9 +78,9 @@ func TestDeleteUsesBatchesWithContentMD5(t *testing.T) {
 			require.Empty(t, request.Header.Get("X-Amz-Trailer"))
 
 			checks = append(checks, valid)
-			conditional = append(
-				conditional,
-				bytes.Count(body, []byte("<ETag>")) == bytes.Count(body, []byte("<Object>")),
+			standard = append(standard,
+				bytes.Count(body, []byte("<Key>")) == bytes.Count(body, []byte("<Object>")) &&
+					!bytes.Contains(body, []byte("<ETag>")),
 			)
 			mutex.Unlock()
 			writer.Header().Set("Content-Type", "application/xml")
@@ -109,7 +109,7 @@ func TestDeleteUsesBatchesWithContentMD5(t *testing.T) {
 	defer mutex.Unlock()
 
 	require.Equal(t, []bool{true, true}, checks)
-	require.Equal(t, []bool{true, true}, conditional)
+	require.Equal(t, []bool{true, true}, standard)
 }
 
 func TestDeleteGCSUsesGenerationInBatch(t *testing.T) {
@@ -185,21 +185,33 @@ func TestDeleteGCSUsesStandardBatchForUnconditionalObjects(t *testing.T) {
 	require.NotContains(t, string(body), "<ETag>")
 }
 
-func TestDeleteReportsMalformedBatchWithoutUnsafeFallback(t *testing.T) {
+func TestDeleteUsesStrictS3CompatibleXML(t *testing.T) {
 	t.Parallel()
 
-	var batchCalls int
+	var body []byte
 
 	server := httptest.NewServer(
 		http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 			require.Equal(t, http.MethodPost, request.Method)
 
-			batchCalls++
+			var err error
+
+			body, err = io.ReadAll(request.Body)
+			require.NoError(t, err)
 
 			writer.Header().Set("Content-Type", "application/xml")
-			writer.WriteHeader(http.StatusBadRequest)
+
+			if bytes.Contains(body, []byte("<ETag>")) {
+				writer.WriteHeader(http.StatusBadRequest)
+				_, _ = writer.Write([]byte(
+					`<Error><Code>MalformedXML</Code><Message>unsupport node_name: ETag</Message></Error>`,
+				))
+
+				return
+			}
+
 			_, _ = writer.Write([]byte(
-				`<Error><Code>MalformedMultiObjectDeleteRequest</Code><Message>unsupported extension</Message></Error>`,
+				`<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>`,
 			))
 		}),
 	)
@@ -211,13 +223,14 @@ func TestDeleteReportsMalformedBatchWithoutUnsafeFallback(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = store.Delete(context.Background(), []domain.Object{
+	requireDeleteNoError(t, store, []domain.Object{
 		{Key: "object-a", ETag: "etag-a"},
 		{Key: "object-b", ETag: `"etag-b"`},
 	})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "MalformedMultiObjectDeleteRequest")
-	require.Equal(t, 1, batchCalls)
+	require.Equal(t, 2, bytes.Count(body, []byte("<Object>")))
+	require.Equal(t, 2, bytes.Count(body, []byte("<Key>")))
+	require.NotContains(t, string(body), "<ETag>")
+	require.NotContains(t, string(body), "<VersionId>")
 }
 
 func TestDeleteReportsPartialBatchResults(t *testing.T) {
@@ -363,7 +376,7 @@ func TestListVersionLevelIncludesDeleteMarkersAndHiddenPrefixes(t *testing.T) {
 	require.Equal(t, "v1", level.Objects[1].VersionID)
 }
 
-func TestDeleteRequiresIdentityForUnversionedObjects(t *testing.T) {
+func TestDeleteRequiresGenerationOnlyForGCSObjects(t *testing.T) {
 	t.Parallel()
 
 	store, err := NewS3(context.Background(), S3Options{
@@ -372,9 +385,6 @@ func TestDeleteRequiresIdentityForUnversionedObjects(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.ErrorContains(t, store.Walk(context.Background(), "", false, nil), "visitor")
-	_, err = store.Delete(context.Background(), []domain.Object{{Key: "object"}})
-	require.ErrorContains(t, err, "has no ETag")
-
 	store.gcsEndpoint = true
 	_, err = store.Delete(context.Background(), []domain.Object{{Key: "object", ETag: "etag"}})
 	require.ErrorContains(t, err, "has no GCS generation")

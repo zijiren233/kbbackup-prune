@@ -275,7 +275,7 @@ kbbackup-prune prune \
 
 Bucket 开启或暂停过版本控制时，程序默认阻断真实删除；确认需要永久删除全部版本后加入 `--purge-versions`。删除请求携带精确 VersionID，因此扫描后出现的新版本会保留。对象锁、legal hold 和 Bucket policy 仍由 S3 服务端执行，失败会记录到每个前缀的结果中。
 
-AWS S3 支持在 `DeleteObjects` 的每个 ObjectIdentifier 中携带 ETag 条件。当前 MinIO 和 RustFS 会忽略这个 XML 字段。程序会在删除前复核完整对象快照，最终检查到服务端执行之间仍存在覆盖竞态：
+程序会在删除前复核完整对象快照，包括 Key、ETag、VersionID/GCS generation、大小和最后修改时间。批量删除请求采用 S3 通用 XML：普通对象携带 `Key`，版本化对象携带 `Key` 和 `VersionId`。最终复核与服务端执行之间仍存在覆盖竞态；版本化 Bucket 通过精确 VersionID 将删除范围固定到扫描到的版本，无版本 Bucket 需要由运维者接受这段竞态窗口：
 
 ```bash
 kbbackup-prune prune \
@@ -285,7 +285,7 @@ kbbackup-prune prune \
   --confirm=DELETE
 ```
 
-该模式仍会在删除前核对完整对象快照，并把 List/Delete 之间的剩余覆盖竞态作为显式运维风险。
+该模式会在删除前核对完整对象快照，并把 List/Delete 之间的剩余覆盖竞态作为显式运维风险。
 
 ## 环境变量
 
@@ -302,15 +302,15 @@ make helm-lint
 
 `internal/objectstore` 的集成测试通过 testcontainers 覆盖以下 S3-compatible 服务：
 
-| 服务 | 镜像版本 | 原生 `DeleteObjects` 校验行为 | ETag 条件删除 |
+| 服务 | 镜像版本 | 原生 `DeleteObjects` 校验行为 | 删除对象标识 |
 | --- | --- | --- | --- |
-| MinIO | `RELEASE.2024-01-16T16-07-38Z` | 强制 `Content-MD5` | 忽略 ObjectIdentifier ETag |
-| MinIO | `RELEASE.2025-09-07T16-13-09Z` | 接受 AWS SDK 默认 CRC32 | 忽略 ObjectIdentifier ETag |
-| RustFS | `1.0.0-beta.12` | 接受 AWS SDK 默认 CRC32 | 忽略 ObjectIdentifier ETag |
+| MinIO | `RELEASE.2024-01-16T16-07-38Z` | 强制 `Content-MD5` | `Key` / `Key + VersionId` |
+| MinIO | `RELEASE.2025-09-07T16-13-09Z` | 接受 AWS SDK 默认 CRC32 | `Key` / `Key + VersionId` |
+| RustFS | `1.0.0-beta.12` | 接受 AWS SDK 默认 CRC32 | `Key` / `Key + VersionId` |
 
-AWS SDK v2 的 `DeleteObjectsInput.ChecksumAlgorithm=MD5` 当前会在客户端校验阶段返回 `unknown checksum algorithm, MD5`。适配器移除该操作的 flexible-checksum middleware，再通过 Smithy middleware 为每个批量删除请求计算标准 `Content-MD5`，同时兼容以上三种服务，并保留每批最多 1000 个对象的批量删除。测试覆盖 MD5 与 flexible checksum 的排他性、ETag 条件行为、对象读取、分页接口、普通删除、Bucket 版本控制、历史版本永久删除，以及 GCS endpoint、generation、版本列表互操作请求头和 SigV4 signed headers。Docker 不可用时测试会 skip；CI 可设置 `REQUIRE_TESTCONTAINERS=true` 强制执行。
+AWS SDK v2 的 `DeleteObjectsInput.ChecksumAlgorithm=MD5` 当前会在客户端校验阶段返回 `unknown checksum algorithm, MD5`。适配器移除该操作的 flexible-checksum middleware，再通过 Smithy middleware 为每个批量删除请求计算标准 `Content-MD5`，同时兼容以上三种服务，并保留每批最多 1000 个对象的批量删除。测试覆盖 MD5 与 flexible checksum 的排他性、严格 S3-compatible XML、对象读取、分页接口、普通删除、Bucket 版本控制、历史版本永久删除，以及 GCS endpoint、generation、版本列表互操作请求头和 SigV4 signed headers。Docker 不可用时测试会 skip；CI 可设置 `REQUIRE_TESTCONTAINERS=true` 强制执行。
 
-GCS XML API 的 Multi-Object Delete 请求体使用 `Key` 和可选 `VersionId`。适配器从普通对象列表的 `<Generation>` 保存对象 generation，版本列表请求携带并签名 `x-goog-interop-list-objects-format: enabled`，删除时把 generation 映射为 `VersionId`。缺少 generation 或 VersionID 的 GCS 对象会停止删除并报告身份缺失。其他 S3 兼容服务使用带 ETag 的批量删除；`MalformedMultiObjectDeleteRequest` 会原样返回，便于按服务能力显式处理。`Quiet=false` 让执行汇总准确记录批量请求中的部分成功。大批量任务可提高 `--timeout` 和 `--concurrency`，例如 `--timeout=2h --concurrency=16`。
+GCS XML API 的 Multi-Object Delete 请求体使用 `Key` 和可选 `VersionId`。适配器从普通对象列表的 `<Generation>` 保存对象 generation，版本列表请求携带并签名 `x-goog-interop-list-objects-format: enabled`，删除时把 generation 映射为 `VersionId`。缺少 generation 或 VersionID 的 GCS 对象会停止删除并报告身份缺失。普通 S3-compatible 服务使用 `Key`，版本化对象增加 `VersionId`，兼容腾讯 COS、阿里 OSS、火山 TOS、MinIO 和 RustFS 等严格 XML 解析器。`Quiet=false` 让执行汇总准确记录批量请求中的部分成功。大批量任务可提高 `--timeout` 和 `--concurrency`，例如 `--timeout=2h --concurrency=16`。
 
 ## 架构
 

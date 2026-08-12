@@ -35,9 +35,8 @@ func TestS3MinIO(t *testing.T) {
 
 	endpoint := startMinIO(t, ctx, "minio/minio:RELEASE.2024-01-16T16-07-38Z")
 	runS3CompatibilitySuite(t, ctx, endpoint, checksumCompatibility{
-		defaultSDK:      false,
-		explicitMD5:     false,
-		conditionalETag: false,
+		defaultSDK:  false,
+		explicitMD5: false,
 	})
 }
 
@@ -47,9 +46,8 @@ func TestS3CurrentMinIO(t *testing.T) {
 
 	endpoint := startMinIO(t, ctx, "minio/minio:RELEASE.2025-09-07T16-13-09Z")
 	runS3CompatibilitySuite(t, ctx, endpoint, checksumCompatibility{
-		defaultSDK:      true,
-		explicitMD5:     false,
-		conditionalETag: false,
+		defaultSDK:  true,
+		explicitMD5: false,
 	})
 }
 
@@ -82,16 +80,14 @@ func TestS3RustFS(t *testing.T) {
 	endpoint := "http://" + net.JoinHostPort(host, port.Port())
 
 	runS3CompatibilitySuite(t, ctx, endpoint, checksumCompatibility{
-		defaultSDK:      true,
-		explicitMD5:     false,
-		conditionalETag: false,
+		defaultSDK:  true,
+		explicitMD5: false,
 	})
 }
 
 type checksumCompatibility struct {
-	defaultSDK      bool
-	explicitMD5     bool
-	conditionalETag bool
+	defaultSDK  bool
+	explicitMD5 bool
 }
 
 func startMinIO(t *testing.T, ctx context.Context, image string) string {
@@ -159,12 +155,6 @@ func runS3CompatibilitySuite(
 		expect.explicitMD5,
 		deleteWithSDKChecksum(t, ctx, admin, "checksum-md5", types.ChecksumAlgorithmMd5),
 	)
-	require.Equal(
-		t,
-		expect.conditionalETag,
-		deleteWithConditionalETag(t, ctx, store, admin, "conditional-delete"),
-	)
-
 	putObject(t, ctx, admin, "root/backup/kubeblocks-backup.json", "manifest-v1")
 	putObject(t, ctx, admin, "root/backup/data", "payload")
 	objects, err := store.List(ctx, "root", false)
@@ -254,33 +244,6 @@ func countDeleteMarkers(objects []domain.Object) int {
 	}
 
 	return count
-}
-
-func deleteWithConditionalETag(
-	t *testing.T,
-	ctx context.Context,
-	store *S3,
-	client *s3.Client,
-	key string,
-) bool {
-	t.Helper()
-
-	putObject(t, ctx, client, key, "before")
-	planned, err := store.Stat(ctx, key)
-	require.NoError(t, err)
-	putObject(t, ctx, client, key, "after")
-
-	_, deleteErr := store.Delete(ctx, []domain.Object{planned})
-	_, statErr := store.Stat(ctx, key)
-	remains := statErr == nil
-
-	_, cleanupErr := client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(testBucket),
-		Key:    aws.String(key),
-	})
-	require.NoError(t, cleanupErr)
-
-	return remains && deleteErr != nil && strings.Contains(deleteErr.Error(), "Precondition")
 }
 
 func deleteWithSDKChecksum(

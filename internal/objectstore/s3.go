@@ -425,7 +425,7 @@ func (s *S3) Delete(ctx context.Context, objects []domain.Object) (domain.Delete
 		end := min(start+batchSize, len(objects))
 
 		batch := objects[start:end]
-		batchReport, err := s.deleteBatch(ctx, batch, !s.gcsEndpoint)
+		batchReport, err := s.deleteBatch(ctx, batch)
 		report.Deleted = append(report.Deleted, batchReport.Deleted...)
 
 		report.Failed = append(report.Failed, batchReport.Failed...)
@@ -440,25 +440,16 @@ func (s *S3) Delete(ctx context.Context, objects []domain.Object) (domain.Delete
 func (s *S3) deleteBatch(
 	ctx context.Context,
 	objects []domain.Object,
-	conditional bool,
 ) (domain.DeleteReport, error) {
 	identifiers := make([]types.ObjectIdentifier, 0, len(objects))
 	for _, object := range objects {
 		identifier := types.ObjectIdentifier{Key: aws.String(object.Key)}
-		switch {
-		case deleteVersionID(object) != "":
+		if deleteVersionID(object) != "" {
 			identifier.VersionId = aws.String(deleteVersionID(object))
-		case !conditional:
+		} else if s.gcsEndpoint {
 			return domain.DeleteReport{}, fmt.Errorf(
 				"object %q has no GCS generation for conditional deletion", object.Key,
 			)
-		case object.ETag == "":
-			return domain.DeleteReport{}, fmt.Errorf(
-				"object %q has no ETag for conditional deletion",
-				object.Key,
-			)
-		default:
-			identifier.ETag = aws.String(object.ETag)
 		}
 
 		identifiers = append(identifiers, identifier)
