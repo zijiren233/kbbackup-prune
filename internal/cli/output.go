@@ -16,6 +16,22 @@ type commandOutput struct {
 	Execution *domain.Execution `json:"execution,omitempty"`
 }
 
+type checkedWriter struct {
+	writer io.Writer
+	err    error
+}
+
+func (writer *checkedWriter) Write(data []byte) (int, error) {
+	if writer.err != nil {
+		return 0, writer.err
+	}
+
+	written, err := writer.writer.Write(data)
+	writer.err = err
+
+	return written, err
+}
+
 func writeOutput(
 	writer io.Writer,
 	format string,
@@ -36,6 +52,8 @@ func writeOutput(
 		return fmt.Errorf("unsupported output format %q; use table or json", format)
 	}
 
+	output := &checkedWriter{writer: writer}
+
 	mode := "plan"
 	if execution != nil && execution.DryRun {
 		mode = "dry-run"
@@ -50,8 +68,8 @@ func writeOutput(
 		versioning += " (" + plan.VersioningSource + ")"
 	}
 
-	fmt.Fprintf(
-		writer,
+	_, _ = fmt.Fprintf(
+		output,
 		"Mode: %s  Repository: %s  Bucket: %s  Versioning: %s\n",
 		mode,
 		plan.Repository,
@@ -60,8 +78,8 @@ func writeOutput(
 	)
 
 	if len(plan.Prefixes) > 1 {
-		fmt.Fprintf(
-			writer,
+		_, _ = fmt.Fprintf(
+			output,
 			"Discovered PVC roots: %d (repository: %d, protected user: %d, "+
 				"unowned: %d, other: %d)\n",
 			rootCounts.Total,
@@ -71,11 +89,11 @@ func writeOutput(
 			rootCounts.Other,
 		)
 	} else if plan.Prefix != "" {
-		fmt.Fprintf(writer, "Scan prefix: %s\n", plan.Prefix)
+		_, _ = fmt.Fprintf(output, "Scan prefix: %s\n", plan.Prefix)
 	}
 
-	fmt.Fprintf(
-		writer,
+	_, _ = fmt.Fprintf(
+		output,
 		"Scanned: %d objects / %s  Eligible: %d objects / %s  Unclassified: %d objects / %s\n\n",
 		plan.ScannedObjects,
 		humanBytes(plan.ScannedBytes),
@@ -84,9 +102,14 @@ func writeOutput(
 		plan.UnclassifiedObjects,
 		humanBytes(plan.UnclassifiedBytes),
 	)
-	table := tabwriter.NewWriter(writer, 2, 4, 2, ' ', 0)
 
-	_, _ = fmt.Fprintln(table, "STATE\tTYPE\tBACKUP\tAGE\tOBJECTS\tSIZE\tPREFIX\tREASON")
+	table := tabwriter.NewWriter(output, 2, 4, 2, ' ', 0)
+
+	_, _ = fmt.Fprintln(
+		table,
+		"STATE\tTYPE\tBACKUP\tAGE\tOBJECTS\tSIZE\tPREFIX\tREASON",
+	)
+
 	for _, candidate := range plan.Candidates {
 		age := "unknown"
 		if !candidate.CreatedAt.IsZero() {
@@ -118,9 +141,10 @@ func writeOutput(
 	}
 
 	if len(plan.BlockingReasons) > 0 {
-		_, _ = fmt.Fprintln(writer, "\nExecution blockers:")
+		_, _ = fmt.Fprintln(output, "\nExecution blockers:")
+
 		for _, reason := range plan.BlockingReasons {
-			_, _ = fmt.Fprintf(writer, "- %s\n", reason)
+			_, _ = fmt.Fprintf(output, "- %s\n", reason)
 		}
 	}
 
@@ -135,7 +159,13 @@ func writeOutput(
 			deletedBytes += result.BytesDeleted
 			if result.Error != "" {
 				failed++
-				_, _ = fmt.Fprintf(writer, "FAILED %s: %s\n", result.Prefix, result.Error)
+
+				_, _ = fmt.Fprintf(
+					output,
+					"FAILED %s: %s\n",
+					result.Prefix,
+					result.Error,
+				)
 			}
 		}
 
@@ -144,11 +174,18 @@ func writeOutput(
 			action = "Deleted"
 		}
 
-		_, _ = fmt.Fprintf(writer, "\n%s: %d objects / %s across %d candidates; failures: %d\n",
-			action, deletedObjects, humanBytes(deletedBytes), len(execution.Results), failed)
+		_, _ = fmt.Fprintf(
+			output,
+			"\n%s: %d objects / %s across %d candidates; failures: %d\n",
+			action,
+			deletedObjects,
+			humanBytes(deletedBytes),
+			len(execution.Results),
+			failed,
+		)
 	}
 
-	return nil
+	return output.err
 }
 
 func outputVolumeRootCounts(plan domain.Plan) domain.VolumeRootCounts {

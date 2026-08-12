@@ -322,10 +322,10 @@ func (p Planner) readCandidate(
 	opts PlanOptions,
 	inventory domain.Inventory,
 	cutoff time.Time,
-) domain.Candidate {
+) (candidate domain.Candidate) {
 	prefix := strings.TrimSuffix(marker.Key, "/"+opts.ManifestName)
 
-	candidate := domain.Candidate{
+	candidate = domain.Candidate{
 		Kind:               domain.CandidateBackup,
 		Prefix:             cleanKey(prefix),
 		ManifestKey:        marker.Key,
@@ -346,7 +346,14 @@ func (p Planner) readCandidate(
 		candidate.Reason = fmt.Sprintf("read manifest: %v", err)
 		return candidate
 	}
-	defer body.Close()
+
+	defer func() {
+		if closeErr := body.Close(); closeErr != nil {
+			candidate.State = domain.StateInvalidManifest
+			candidate.Reason = fmt.Sprintf("close manifest: %v", closeErr)
+			candidate.Manifest = nil
+		}
+	}()
 
 	decoder := json.NewDecoder(io.LimitReader(body, maxManifestBytes+1))
 

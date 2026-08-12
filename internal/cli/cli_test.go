@@ -12,6 +12,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type failingWriter struct {
+	err error
+}
+
+func (writer failingWriter) Write(_ []byte) (int, error) {
+	return 0, writer.err
+}
+
 func TestFormatBytes(t *testing.T) {
 	t.Parallel()
 
@@ -133,6 +141,20 @@ func TestOutput(t *testing.T) {
 		writeOutput(&bytes.Buffer{}, "yaml", plan, nil, false),
 		"unsupported output",
 	)
+}
+
+func TestOutputReturnsWriterError(t *testing.T) {
+	t.Parallel()
+
+	writeErr := errors.New("write failed")
+	err := writeOutput(
+		failingWriter{err: writeErr},
+		"table",
+		domain.Plan{Repository: "repo", Bucket: "bucket", Versioning: "Disabled"},
+		nil,
+		false,
+	)
+	require.ErrorIs(t, err, writeErr)
 }
 
 func TestOutputShowsOrphanRepositoryRootAsSingleDeferredCandidate(t *testing.T) {

@@ -22,6 +22,7 @@ type memoryStore struct {
 	walkCalls       int
 	bodies          map[string]string
 	openErrors      map[string]error
+	closeErrors     map[string]error
 	versioning      string
 	versioningCalls int
 	listErr         error
@@ -32,6 +33,15 @@ type memoryStore struct {
 	deleteErrAt     int
 	listMutex       sync.Mutex
 	listCalls       []string
+}
+
+type closeErrorReader struct {
+	io.Reader
+	err error
+}
+
+func (reader closeErrorReader) Close() error {
+	return reader.err
 }
 
 func (s *memoryStore) ListLevel(
@@ -137,6 +147,11 @@ func (s *memoryStore) Open(_ context.Context, key string, _ int64) (io.ReadClose
 	if err := s.openErrors[key]; err != nil {
 		return nil, err
 	}
+
+	if err := s.closeErrors[key]; err != nil {
+		return closeErrorReader{Reader: strings.NewReader(s.bodies[key]), err: err}, nil
+	}
+
 	return io.NopCloser(strings.NewReader(s.bodies[key])), nil
 }
 
@@ -419,6 +434,33 @@ func manifestWithSpecParent(t *testing.T, body, parent string) string {
 
 func markerObject(key string, modified time.Time) domain.Object {
 	return domain.Object{Key: key, Size: 100, LastModified: modified, ETag: "etag-" + key}
+}
+
+func TestReadCandidateRejectsManifestCloseError(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.August, 12, 12, 0, 0, 0, time.UTC)
+	created := now.Add(-30 * 24 * time.Hour)
+	prefix := "root/ns/cluster/component/orphan"
+	marker := markerObject(prefix+"/"+domain.DefaultManifest, created)
+	closeErr := errors.New("checksum validation failed")
+	store := &memoryStore{
+		bodies: map[string]string{
+			marker.Key: backupManifest(t, "repo", "orphan", prefix, created, "Delete"),
+		},
+		closeErrors: map[string]error{marker.Key: closeErr},
+	}
+
+	candidate := (Planner{Store: store}).readCandidate(
+		context.Background(),
+		marker,
+		PlanOptions{ManifestName: domain.DefaultManifest, Repository: "repo"},
+		domain.Inventory{Repo: domain.Repository{Name: "repo", PathPrefix: "root"}},
+		now.Add(-7*24*time.Hour),
+	)
+	require.Equal(t, domain.StateInvalidManifest, candidate.State)
+	require.Equal(t, "close manifest: checksum validation failed", candidate.Reason)
+	require.Nil(t, candidate.Manifest)
 }
 
 func TestPlannerBuildSafetyStates(t *testing.T) {
